@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Training to your assistant</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #f2f2f7; color: #111; }
+  @media (prefers-color-scheme: dark) { body { background: #000; color: #f2f2f7; } .card { background: #1c1c1e !important; } }
+  main { max-width: 440px; margin: 40px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 16px; padding: 20px; margin-bottom: 14px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { line-height: 1.45; margin: 8px 0; }
+  ul { padding-left: 20px; line-height: 1.6; margin: 8px 0; }
+  .sub { color: #6b6b70; font-size: 14px; }
+  input { width: 100%; box-sizing: border-box; font-size: 17px; padding: 12px; border-radius: 10px; border: 1px solid #c7c7cc; margin: 10px 0; }
+  button { width: 100%; font-size: 17px; font-weight: 600; padding: 13px; border-radius: 12px; border: 0; margin-top: 8px; cursor: pointer; }
+  .go { background: #0a84ff; color: #fff; }
+  .no { background: transparent; color: #0a84ff; }
+  .err { color: #ff3b30; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1 id="title">Connect Training</h1>
+    <p class="sub" id="lead">Loading…</p>
+  </div>
+
+  <div class="card hide" id="signin">
+    <p>Sign in with the email you use for Training. We'll send you a link; open it on this device and you'll come straight back here.</p>
+    <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+    <button class="go" id="send">Email me a sign-in link</button>
+    <p class="sub hide" id="sent">Check your email and tap the link. You can close that tab once you're back here.</p>
+  </div>
+
+  <div class="card hide" id="consent">
+    <p><b id="client">Your assistant</b> wants to connect to your Training account. It will be able to:</p>
+    <ul>
+      <li>Read today's meals, what's logged, and your calorie and protein totals</li>
+      <li>Search your foods and the food list</li>
+      <li>Log a meal or an extra for today or yesterday, with calories worked out by Training</li>
+      <li>Undo entries it made</li>
+    </ul>
+    <p class="sub">It can't see your weight, health data or history beyond yesterday, change your plan or settings, or delete anything else. Entries it makes are marked and can be undone in the app. You can disconnect any time in Training → Profile.</p>
+    <p class="sub" id="who"></p>
+    <button class="go" id="allow">Allow</button>
+    <button class="no" id="deny">Don't allow</button>
+  </div>
+
+  <p class="err" id="error"></p>
+</main>
+
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const supabase = createClient(
+  "https://nibkglbzbowzttwefirh.supabase.co",
+  "sb_publishable_VA-sFy4yer9Jy0DRS2i0-Q_gJFNbNAF",
+  { auth: { flowType: "implicit", detectSessionInUrl: true, persistSession: true } }
+);
+
+const $ = (id) => document.getElementById(id);
+const show = (id, on = true) => $(id).classList.toggle("hide", !on);
+const fail = (msg) => { $("error").textContent = msg; };
+
+// The authorization id survives the email round trip.
+const params = new URLSearchParams(location.search);
+let authorizationId = params.get("authorization_id") || sessionStorage.getItem("authorization_id");
+if (authorizationId) sessionStorage.setItem("authorization_id", authorizationId);
+
+async function run() {
+  if (!authorizationId) {
+    $("lead").textContent = "Start from Claude or ChatGPT: add the Training connector there and it will open this page.";
+    return;
+  }
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) {
+    $("lead").textContent = "First, sign in to Training.";
+    show("signin");
+    return;
+  }
+  const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error) { fail("This request has expired or isn't valid. Start again from your assistant."); $("lead").textContent = ""; return; }
+  // Already allowed before: straight back to the assistant.
+  if (!data.authorization_id && data.redirect_url) { location.href = data.redirect_url; return; }
+  $("lead").textContent = "Review what your assistant can do.";
+  $("client").textContent = data.client?.name || "Your assistant";
+  $("who").textContent = "Signed in as " + (session.user.email || "your account") + ".";
+  show("consent");
+}
+
+$("send").onclick = async () => {
+  const email = $("email").value.trim();
+  if (!email) return;
+  $("send").disabled = true;
+  const back = location.origin + location.pathname + "?authorization_id=" + encodeURIComponent(authorizationId);
+  const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: back, shouldCreateUser: false } });
+  $("send").disabled = false;
+  if (error) { fail("Couldn't send the link: " + error.message); return; }
+  show("sent");
+};
+
+$("allow").onclick = async () => {
+  $("allow").disabled = true;
+  const { data, error } = await supabase.auth.oauth.approveAuthorization(authorizationId);
+  if (error) { $("allow").disabled = false; fail("Couldn't allow: " + error.message); return; }
+  sessionStorage.removeItem("authorization_id");
+  location.href = data.redirect_url;
+};
+
+$("deny").onclick = async () => {
+  const { data, error } = await supabase.auth.oauth.denyAuthorization(authorizationId);
+  if (error) { fail("Couldn't cancel: " + error.message); return; }
+  sessionStorage.removeItem("authorization_id");
+  location.href = data.redirect_url;
+};
+
+supabase.auth.onAuthStateChange((event) => { if (event === "SIGNED_IN") run(); });
+run();
+</script>
+</body>
+</html>
